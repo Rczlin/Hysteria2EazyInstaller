@@ -321,7 +321,6 @@ masquerade:
 udpIdleTimeout: 60s
 udpHopInterval: 30s
 
-ignoreClientBandwidth: true
 disableUDP: false
 EOF
 
