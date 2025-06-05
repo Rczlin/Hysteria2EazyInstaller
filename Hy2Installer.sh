@@ -322,6 +322,7 @@ udpIdleTimeout: 60s
 udpHopInterval: 30s
 
 disableUDP: false
+ignoreClientBandwidth: true
 EOF
 
     # 设置配置文件权限
