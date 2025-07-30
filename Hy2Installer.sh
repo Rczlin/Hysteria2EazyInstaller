@@ -521,14 +521,14 @@ main() {
     sleep 3
     
     if check_service_status; then
-        # 进行网络测速
-        run_speedtest
         output_connection_info
         log_info "安装完成! 请查看上方的连接信息"
     else
         log_error "安装过程中出现错误，请检查日志"
         exit 1
     fi
+    # 进行网络测速
+    run_speedtest
 }
 trap 'log_error "脚本执行过程中发生错误，退出码: $?"' ERR
 main "$@"
