@@ -178,67 +178,6 @@ update_system() {
     apt install -y curl wget openssl ufw python3 qrencode
 }
 
-# 安装speedtest-cli进行网络测速
-install_speedtest() {
-    log_step "安装speedtest工具..."
-    
-    # 安装speedtest-cli
-    if ! command -v speedtest-cli &> /dev/null; then
-        apt install -y speedtest-cli
-    fi
-    
-    log_info "speedtest工具安装完成"
-}
-
-# 进行网络测速
-run_speedtest() {
-    log_step "正在进行最近节点的网络测速..."
-    
-    local speedtest_result
-    speedtest_result=$(speedtest-cli --simple 2>/dev/null | grep -E "Download|Upload|Ping" || echo "测速失败")
-
-    if [[ "$speedtest_result" != "测速失败" ]]; then
-        # 解析原始结果
-        local download_raw=$(echo "$speedtest_result" | grep "Download" | awk '{print $2}')
-        local download_unit=$(echo "$speedtest_result" | grep "Download" | awk '{print $3}')
-        local upload_raw=$(echo "$speedtest_result" | grep "Upload" | awk '{print $2}')
-        local upload_unit=$(echo "$speedtest_result" | grep "Upload" | awk '{print $3}')
-        local ping=$(echo "$speedtest_result" | grep "Ping" | awk '{print $2, $3}')
-
-        # 转换为 MB/s（如果单位是 Mbit/s）
-        local download_converted=""
-        local upload_converted=""
-
-        if [[ "$download_unit" == "Mbit/s" ]]; then
-            download_converted=$(awk "BEGIN {printf \"%.2f MB/s\", $download_raw / 8}")
-        else
-            download_converted="${download_raw} ${download_unit}"
-        fi
-
-        if [[ "$upload_unit" == "Mbit/s" ]]; then
-            upload_converted=$(awk "BEGIN {printf \"%.2f MB/s\", $upload_raw / 8}")
-        else
-            upload_converted="${upload_raw} ${upload_unit}"
-        fi
-
-        # 保存测速结果到临时文件
-        cat > /tmp/speedtest_result << EOF
-下载速度: $download_converted
-上传速度: $upload_converted
-延迟: $ping
-EOF
-    else
-        cat > /tmp/speedtest_result << EOF
-下载速度: 测速失败
-上传速度: 测速失败
-延迟: 测速失败
-EOF
-    fi
-
-    log_info "网络测速完成"
-}
-
-
 # 生成二维码(使用ASCII字符)
 generate_qrcode() {
     local connection_url="$1"
@@ -281,7 +220,7 @@ generate_certificate() {
     openssl genrsa -out "$cert_dir/private.key" 2048
     
     # 生成证书
-    openssl req -new -x509 -key "$cert_dir/private.key" -out "$cert_dir/cert.crt" -days 365 -subj "/C=US/ST=State/L=City/O=Organization/CN=www.csdn.net"
+    openssl req -new -x509 -key "$cert_dir/private.key" -out "$cert_dir/cert.crt" -days 365 -subj "/C=US/ST=State/L=City/O=Organization/CN=www.apple.com"
     
     # 设置权限
     chmod 600 "$cert_dir/private.key"
@@ -315,7 +254,7 @@ auth:
 masquerade:
   type: proxy
   proxy:
-    url: https://www.csdn.net/
+    url: https://www.apple.com/
     rewriteHost: true
 
 udpIdleTimeout: 60s
@@ -415,7 +354,7 @@ output_connection_info() {
     
     local server_ip=$(get_server_ip)
     local password=$(cat /tmp/hy2_password)
-    local connection_url="hysteria2://$password@$server_ip:443/?insecure=1&sni=www.csdn.net#HY2-Server"
+    local connection_url="hysteria2://$password@$server_ip:443/?insecure=1&sni=www.apple.com#HY2-Server"
     
     echo ""
     echo "========================================"
@@ -426,9 +365,8 @@ output_connection_info() {
     echo "服务器IP: $server_ip"
     echo "端口: 443"
     echo "密码: $password"
-    echo "伪装URL: https://www.csdn.net/"
+    echo "伪装URL: https://www.apple.com/"
     echo "端口跳跃: 已启用"
-    echo "流量限制: 无限制"
     echo ""
     echo -e "${BLUE}连接链接:${NC}"
     echo "$connection_url"
@@ -437,18 +375,12 @@ output_connection_info() {
     # 生成二维码
     generate_qrcode "$connection_url"
     
-    echo ""
-    echo -e "${BLUE}网络测速结果:${NC}"
-    if [[ -f /tmp/speedtest_result ]]; then
-        cat /tmp/speedtest_result
-    fi
-    echo ""
     echo -e "${BLUE}客户端配置信息:${NC}"
     cat << EOF
 server: $server_ip:443
 auth: $password
 tls:
-  sni: www.csdn.net
+  sni: www.apple.com
   insecure: true
 EOF
     echo ""
@@ -466,7 +398,7 @@ EOF
     echo ""
     
     # 清理临时文件
-    rm -f /tmp/hy2_password /tmp/speedtest_result
+    rm -f /tmp/hy2_password
 }
 
 main() {
@@ -510,7 +442,6 @@ main() {
     fi
     
     update_system
-    install_speedtest
     install_hysteria2
     generate_certificate
     configure_hysteria2
@@ -527,8 +458,6 @@ main() {
         log_error "安装过程中出现错误，请检查日志"
         exit 1
     fi
-    # 进行网络测速
-    run_speedtest
 }
 trap 'log_error "脚本执行过程中发生错误，退出码: $?"' ERR
 main "$@"
