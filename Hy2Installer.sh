@@ -1,463 +1,775 @@
 #!/bin/bash
-# 用法: 
-#   ./script.sh          - 安装或重新安装
-#   ./script.sh -start   - 启动服务
-#   ./script.sh -stop    - 停止服务
-#   ./script.sh -status  - 查看状态
 
-set -e
+export LANG=en_US.UTF-8
 
-show_disclaimer() {
-    clear
-    echo "========================================"
-    echo -e "${RED}        重要免责声明${NC}"
-    echo "========================================"
-    echo ""
-    echo -e "${YELLOW}请仔细阅读以下免责声明:${NC}"
-    echo ""
-    echo "1. 本脚本仅供学习和技术研究使用"
-    echo "2. 使用者必须遵守当地法律法规"
-    echo "3. 禁止用于任何违法违规活动"
-    echo "4. 作者不对使用本脚本产生的任何后果负责"
-    echo "5. 使用者应自行承担所有风险和责任"
-    echo "6. 如不同意此声明，请立即停止使用"
-    echo ""
-    echo -e "${YELLOW}网络安全提醒:${NC}"
-    echo "• 请确保在合法合规的环境下使用"
-    echo "• 建议仅在测试环境中部署"
-    echo "• 生产环境使用需遵循相关安全规范"
-    echo ""
-    echo -e "${YELLOW}技术支持说明:${NC}"
-    echo "• 本脚本按现状提供，不提供任何保证"
-    echo "• 作者不承担技术支持义务"
-    echo ""
-    echo "========================================"
-    echo -e "${RED}继续使用即表示您完全理解并同意上述条款${NC}"
-    echo "========================================"
-    echo ""
-    echo -n -e "${BLUE}您是否同意上述免责声明并继续? (输入 'YES' 继续，其他任意键退出): ${NC}"
-    read -r agreement
-    
-    if [[ "$agreement" != "YES" ]]; then
-        echo ""
-        log_warn "用户未同意免责声明，脚本退出"
-        echo "感谢您的理解，再见!"
-        exit 0
+RED="\033[31m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+PLAIN="\033[0m"
+
+red(){
+    echo -e "\033[31m\033[01m$1\033[0m"
+}
+
+green(){
+    echo -e "\033[32m\033[01m$1\033[0m"
+}
+
+yellow(){
+    echo -e "\033[33m\033[01m$1\033[0m"
+}
+
+REGEX=("debian" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "amazon linux" "fedora")
+RELEASE=("Debian" "Ubuntu" "CentOS" "CentOS" "Fedora")
+PACKAGE_UPDATE=("apt-get update" "apt-get update" "yum -y update" "yum -y update" "yum -y update")
+PACKAGE_INSTALL=("apt -y install" "apt -y install" "yum -y install" "yum -y install" "yum -y install")
+
+[[ $EUID -ne 0 ]] && red "注意: 请在root用户下运行脚本" && exit 1
+
+CMD=("$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)" "$(hostnamectl 2>/dev/null | grep -i system | cut -d : -f2)" "$(lsb_release -sd 2>/dev/null)" "$(grep -i description /etc/lsb-release 2>/dev/null | cut -d \" -f2)" "$(grep . /etc/redhat-release 2>/dev/null)" "$(grep . /etc/issue 2>/dev/null | cut -d \\ -f1 | sed '/^[ ]*$/d')")
+
+SYS=""
+for i in "${CMD[@]}"; do
+    SYS="$i" && [[ -n $SYS ]] && break
+done
+
+SYSTEM=""
+int=0
+for ((int = 0; int < ${#REGEX[@]}; int++)); do
+    if [[ $(echo "$SYS" | tr '[:upper:]' '[:lower:]') =~ ${REGEX[int]} ]]; then
+        SYSTEM="${RELEASE[int]}"
+        [[ -n $SYSTEM ]] && break
     fi
-    
-    clear
-    log_info "用户已同意免责声明，继续执行..."
-    sleep 1
-}
+done
 
-# 颜色输出
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+[[ -z $SYSTEM ]] && red "目前暂不支持你的VPS的操作系统！" && exit 1
 
-# 日志函数
-log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
-
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-log_step() {
-    echo -e "${BLUE}[STEP]${NC} $1"
-}
-
-# 检查是否已安装Hysteria 2
-check_installation() {
-    if command -v hysteria &> /dev/null && [[ -f /etc/systemd/system/hysteria2.service ]]; then
-        return 0  # 已安装
-    else
-        return 1  # 未安装
+if [[ -z $(type -P curl) ]]; then
+    if [[ ! $SYSTEM == "CentOS" ]]; then
+        ${PACKAGE_UPDATE[int]}
     fi
+    ${PACKAGE_INSTALL[int]} curl
+fi
+
+# URL编码函数
+urlencode() {
+    local string="$1"
+    local strlen=${#string}
+    local encoded=""
+    local pos c o
+
+    for (( pos=0 ; pos<strlen ; pos++ )); do
+        c=${string:$pos:1}
+        case "$c" in
+            [-_.~a-zA-Z0-9] ) o="$c" ;;
+            * ) printf -v o '%%%02X' "'$c" ;;
+        esac
+        encoded+="$o"
+    done
+    echo "$encoded"
 }
 
-# 启动服务
-start_service() {
-    show_disclaimer
-    log_step "启动Hysteria 2服务..."
-    if check_installation; then
-        systemctl start hysteria2.service
-        if systemctl is-active --quiet hysteria2.service; then
-            log_info "Hysteria 2服务启动成功"
+realip(){
+    ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
+}
+
+save_iptables_rules(){
+    if [[ $SYSTEM == "CentOS" ]]; then
+        if [[ -f /usr/libexec/iptables/iptables.init ]]; then
+            service iptables save >/dev/null 2>&1
+            service ip6tables save >/dev/null 2>&1
         else
-            log_error "Hysteria 2服务启动失败"
-            systemctl status hysteria2.service
+            iptables-save > /etc/sysconfig/iptables 2>/dev/null
+            ip6tables-save > /etc/sysconfig/ip6tables 2>/dev/null
         fi
     else
-        log_error "Hysteria 2未安装，请先运行安装"
+        netfilter-persistent save >/dev/null 2>&1
     fi
 }
 
-# 停止服务
-stop_service() {
-    show_disclaimer
-    log_step "停止Hysteria 2服务..."
-    if check_installation; then
-        systemctl stop hysteria2.service
-        log_info "Hysteria 2服务已停止"
+install_iptables_persistent(){
+    if [[ $SYSTEM == "CentOS" ]]; then
+        ${PACKAGE_INSTALL[int]} iptables-services
+        systemctl enable iptables >/dev/null 2>&1
+        systemctl enable ip6tables >/dev/null 2>&1
+        systemctl start iptables >/dev/null 2>&1
+        systemctl start ip6tables >/dev/null 2>&1
     else
-        log_error "Hysteria 2未安装"
+        # 非交互式安装 iptables-persistent
+        echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null
+        echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null
+        DEBIAN_FRONTEND=noninteractive ${PACKAGE_INSTALL[int]} iptables-persistent netfilter-persistent
     fi
 }
 
-# 查看服务状态
-show_status() {
-    log_step "查看Hysteria 2服务状态..."
-    if check_installation; then
-        echo ""
-        echo -e "${BLUE}服务状态:${NC}"
-        systemctl status hysteria2.service --no-pager
-        echo ""
-        echo -e "${BLUE}服务日志 (最近10行):${NC}"
-        journalctl -u hysteria2.service -n 10 --no-pager
-    else
-        log_error "Hysteria 2未安装"
+fix_permissions(){
+    if id "hysteria" &>/dev/null; then
+        chown -R hysteria:hysteria /etc/hysteria
+    fi
+    chmod 755 /etc/hysteria
+    if [[ -f /etc/hysteria/cert.crt ]]; then
+        chmod 644 /etc/hysteria/cert.crt
+    fi
+    if [[ -f /etc/hysteria/private.key ]]; then
+        chmod 600 /etc/hysteria/private.key
     fi
 }
 
-# 询问是否重新安装
-ask_reinstall() {
-    log_warn "检测到Hysteria 2已经安装"
-    echo -n "是否要重新安装? (y/N): "
-    read -r response
-    case "$response" in
-        [yY][eE][sS]|[yY])
-            log_info "开始重新安装..."
-            return 0
-            ;;
-        *)
-            log_info "取消安装，退出脚本"
-            exit 0
-            ;;
-    esac
+inst_cert(){
+    mkdir -p /etc/hysteria
+
+    green "将自动使用自签证书（www.apple.com）"
+
+    cert_path="/etc/hysteria/cert.crt"
+    key_path="/etc/hysteria/private.key"
+
+    openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
+    openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.apple.com"
+
+    hy_domain="www.apple.com"
+    domain="www.apple.com"
+    insecure=1
 }
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        log_error "此脚本需要root权限运行，请使用sudo执行"
+
+inst_port_config(){
+    iptables -t nat -F PREROUTING >/dev/null 2>&1
+    ip6tables -t nat -F PREROUTING >/dev/null 2>&1
+
+    firstport=30000
+    endport=40000
+    hop_interval=25
+
+    port=""
+    for candidate_port in $(seq $firstport $endport); do
+        if [[ -z $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$candidate_port") ]]; then
+            port=$candidate_port
+            break
+        fi
+    done
+
+    if [[ -z $port ]]; then
+        red "30000-40000 范围内未找到可用 UDP 端口，请检查端口占用后重试"
         exit 1
     fi
+
+    iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j DNAT --to-destination :$port
+    ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j DNAT --to-destination :$port
+
+    iptables -I INPUT -p udp --dport $firstport:$endport -j ACCEPT
+    ip6tables -I INPUT -p udp --dport $firstport:$endport -j ACCEPT
+    save_iptables_rules
+
+    yellow "已启用端口跳跃：$firstport - $endport (主监听端口: $port, 跳跃间隔: ${hop_interval}s)"
 }
 
-# 检查系统是否为Debian
-check_system() {
-    if [[ ! -f /etc/debian_version ]]; then
-        log_error "此脚本仅支持Debian系统"
-        exit 1
-    fi
-    log_info "系统检查通过: $(cat /etc/debian_version)"
+inst_pwd(){
+    auth_pwd=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
+    yellow "已生成 32 位随机密码：$auth_pwd"
 }
 
-# 生成随机密码
-generate_password() {
-    openssl rand -base64 32 | tr -d "=+/" | cut -c1-32
+inst_site(){
+    masq_type="string"
+    proxysite=""
+    green "已启用默认伪装：Nginx 私有服务器 403 页面"
 }
 
-# 获取服务器IP
-get_server_ip() {
-    local ip
-    ip=$(curl -s -4 ifconfig.me) || ip=$(curl -s -4 icanhazip.com) || ip=$(wget -qO- -4 ifconfig.me)
-    echo "$ip"
-}
-
-# 更新系统包
-update_system() {
-    log_step "更新系统包..."
-    apt update && apt upgrade -y
-    apt install -y curl wget openssl ufw python3 qrencode
-}
-
-# 生成二维码(使用ASCII字符)
-generate_qrcode() {
-    local connection_url="$1"
-    log_step "生成连接二维码..."
+inst_bandwidth(){
+    echo ""
+    green "设置服务端带宽限制 (速度限制)："
+    echo -e " ${GREEN}1.${PLAIN} 开启 100 Mbps 限制 ${YELLOW}（默认，推荐）${PLAIN}"
+    echo -e "    ${PLAIN}说明：${GREEN}100M 对于 4K 视频绰绰有余。${PLAIN}保持带宽克制能显著降低被运营商QoS(限速)或阻断的风险，使连接更持久稳定。"
+    echo -e " ${GREEN}2.${PLAIN} 不限制带宽 (不推荐)"
+    echo ""
     
-    # 使用qrencode生成二维码
-    if command -v qrencode &> /dev/null; then
-        echo ""
-        echo -e "${BLUE}连接二维码:${NC}"
-        echo "----------------------------------------"
-        qrencode -t ANSIUTF8 "$connection_url"
-        echo "----------------------------------------"
+    read -rp "请输入选项 [1-2]: " bwInput
+    
+    if [[ $bwInput == 2 ]]; then
+        limit_bandwidth="no"
+        bandwidth_value=""
+        yellow "已选择：不限制带宽"
     else
-        log_warn "qrencode未安装，跳过二维码生成"
+        limit_bandwidth="yes"
+        bandwidth_value="100"
+        yellow "已选择：限制服务端带宽为 100 Mbps (上下行)"
     fi
 }
-install_hysteria2() {
-    log_step "安装Hysteria 2..."
-    
-    # 下载安装脚本
-    bash <(curl -fsSL https://get.hy2.sh/)
-    
-    # 检查安装是否成功
-    if ! command -v hysteria &> /dev/null; then
-        log_error "Hysteria 2 安装失败"
-        exit 1
-    fi
-    
-    log_info "Hysteria 2 安装成功"
-}
 
-# 生成自签证书
-generate_certificate() {
-    log_step "生成自签名证书..."
-    
-    local cert_dir="/etc/hysteria2"
-    mkdir -p "$cert_dir"
-    
-    # 生成私钥
-    openssl genrsa -out "$cert_dir/private.key" 2048
-    
-    # 生成证书
-    openssl req -new -x509 -key "$cert_dir/private.key" -out "$cert_dir/cert.crt" -days 365 -subj "/C=US/ST=State/L=City/O=Organization/CN=www.apple.com"
-    
-    # 设置权限
-    chmod 600 "$cert_dir/private.key"
-    chmod 644 "$cert_dir/cert.crt"
-    
-    log_info "证书生成完成"
-}
+generate_config(){
+    mkdir -p /etc/hysteria
 
-# 配置Hysteria 2
-configure_hysteria2() {
-    log_step "配置Hysteria 2..."
-    
-    local config_dir="/etc/hysteria2"
-    local config_file="$config_dir/config.yaml"
-    local password=$(generate_password)
-    
-    mkdir -p "$config_dir"
-    
-    # 创建配置文件
-    cat > "$config_file" << EOF
-listen: :443
+    cat << EOF > /etc/hysteria/config.yaml
+listen: :$port
 
 tls:
-  cert: /etc/hysteria2/cert.crt
-  key: /etc/hysteria2/private.key
+  cert: $cert_path
+  key: $key_path
+
+quic:
+  initStreamReceiveWindow: 16777216
+  maxStreamReceiveWindow: 16777216
+  initConnReceiveWindow: 33554432
+  maxConnReceiveWindow: 33554432
 
 auth:
   type: password
-  password: $password
+  password: "$auth_pwd"
 
+EOF
+
+    if [[ $limit_bandwidth == "yes" ]]; then
+        cat << EOF >> /etc/hysteria/config.yaml
+bandwidth:
+  up: ${bandwidth_value:-100} mbps
+  down: ${bandwidth_value:-100} mbps
+
+EOF
+    fi
+
+    cat << EOF >> /etc/hysteria/config.yaml
 masquerade:
+EOF
+    if [[ $masq_type == "proxy" ]]; then
+        cat << EOF >> /etc/hysteria/config.yaml
   type: proxy
   proxy:
-    url: https://www.apple.com/
+    url: https://$proxysite
     rewriteHost: true
-
-udpIdleTimeout: 60s
-udpHopInterval: 30s
-
-disableUDP: false
-ignoreClientBandwidth: true
 EOF
-
-    # 设置配置文件权限
-    chmod 600 "$config_file"
-    
-    # 保存密码到临时文件供后续使用
-    echo "$password" > /tmp/hy2_password
-    
-    log_info "配置文件创建完成"
+    else
+        cat << EOF >> /etc/hysteria/config.yaml
+  type: string
+  string:
+    content: |
+      <!doctype html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>403 Forbidden</title>
+        <style>
+          body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 20% 20%,#1e293b 0,#0b1220 45%,#060b16 100%);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;color:#e5e7eb}
+          .card{width:min(92vw,760px);background:rgba(15,23,42,.88);border:1px solid rgba(148,163,184,.25);border-radius:18px;padding:34px 30px;box-shadow:0 18px 50px rgba(2,6,23,.55)}
+          h1{margin:0 0 14px;font-size:40px;letter-spacing:.02em}
+          p{margin:0 0 10px;line-height:1.75;color:#cbd5e1}
+          .tag{display:inline-block;margin-top:6px;padding:7px 12px;border-radius:999px;border:1px solid rgba(148,163,184,.35);background:#0a1222;color:#93c5fd;font:600 12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+          hr{margin:24px 0;border:0;border-top:1px solid rgba(148,163,184,.22)}
+          .foot{color:#94a3b8;font-size:14px}
+        </style>
+      </head>
+      <body>
+        <main class="card">
+          <h1>403 Forbidden</h1>
+          <p>Access to this private service is denied.</p>
+          <p>Please contact the system administrator if you believe this is unexpected.</p>
+          <span class="tag">Request-ID: 403-NGX-PRIVATE</span>
+          <hr />
+          <div class="foot">nginx/1.25.5 (private gateway)</div>
+        </main>
+      </body>
+      </html>
+    headers:
+      Content-Type: text/html; charset=utf-8
+      Server: nginx
+    statusCode: 403
+EOF
+    fi
 }
 
-create_systemd_service() {
-    log_step "创建systemd服务..."
+generate_client_config(){
+    realip
     
-    cat > /etc/systemd/system/hysteria2.service << EOF
-[Unit]
-Description=Hysteria 2 Server
-After=network.target
-Wants=network.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria2/config.yaml
-Restart=always
-RestartSec=5
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # 重新加载systemd
-    systemctl daemon-reload
-    
-    # 启用并启动服务
-    systemctl enable hysteria2.service
-    systemctl start hysteria2.service
-    
-    log_info "systemd服务创建并启动完成"
-}
-
-# 配置防火墙
-configure_firewall() {
-    log_step "检查防火墙配置..."
-
-    if ! command -v ufw &> /dev/null; then
-        log_warn "未安装ufw，跳过防火墙配置"
-        return
+    if [[ -n $firstport && -n $endport ]]; then
+        server_port_string="$port,$firstport-$endport"
+    else
+        server_port_string=$port
     fi
 
-    local status
-    status=$(ufw status 2>/dev/null | grep -i "Status:" | awk '{print $2}')
-    if [[ "$status" != "active" ]]; then
-        log_warn "ufw 未启用（当前状态: $status），跳过防火墙配置"
-        return
+    if [[ -n $(echo $ip | grep ":") ]]; then
+        last_ip="[$ip]"
+    else
+        last_ip=$ip
     fi
 
-    log_step "配置防火墙规则..."
+    # 根据 insecure 变量设置布尔值
+    if [[ $insecure == 1 ]]; then
+        insecure_bool="true"
+    else
+        insecure_bool="false"
+    fi
 
-    # 允许SSH连接
-    ufw allow ssh
+    mkdir -p /root/hy
+    
+    # 生成 YAML 客户端配置
+    cat << EOF > /root/hy/hy-client.yaml
+server: $last_ip:$server_port_string
 
-    # 允许443端口
-    ufw allow 443/tcp
-    ufw allow 443/udp
+auth: $auth_pwd
 
-    ufw reload
+tls:
+  sni: $hy_domain
+  insecure: $insecure_bool
 
-    log_info "防火墙规则配置完成"
+quic:
+  initStreamReceiveWindow: 16777216
+  maxStreamReceiveWindow: 16777216
+  initConnReceiveWindow: 33554432
+  maxConnReceiveWindow: 33554432
+
+fastOpen: true
+
+socks5:
+  listen: 127.0.0.1:5678
+
+EOF
+
+    # 仅在端口跳跃模式下添加 transport 配置
+    if [[ -n $firstport && -n $endport ]]; then
+        cat << EOF >> /root/hy/hy-client.yaml
+transport:
+  udp:
+    hopInterval: ${hop_interval:-25}s
+EOF
+    fi
+    
+    # 生成 JSON 配置
+    if [[ -n $firstport && -n $endport ]]; then
+        cat << EOF > /root/hy/hy-client.json
+{
+  "server": "$last_ip:$server_port_string",
+  "auth": "$auth_pwd",
+  "tls": {
+    "sni": "$hy_domain",
+    "insecure": $insecure_bool
+  },
+  "quic": {
+    "initStreamReceiveWindow": 16777216,
+    "maxStreamReceiveWindow": 16777216,
+    "initConnReceiveWindow": 33554432,
+    "maxConnReceiveWindow": 33554432
+  },
+  "socks5": {
+    "listen": "127.0.0.1:5678"
+  },
+  "transport": {
+    "udp": {
+      "hopInterval": "${hop_interval:-25}s"
+    }
+  }
+}
+EOF
+    else
+        cat << EOF > /root/hy/hy-client.json
+{
+  "server": "$last_ip:$server_port_string",
+  "auth": "$auth_pwd",
+  "tls": {
+    "sni": "$hy_domain",
+    "insecure": $insecure_bool
+  },
+  "quic": {
+    "initStreamReceiveWindow": 16777216,
+    "maxStreamReceiveWindow": 16777216,
+    "initConnReceiveWindow": 33554432,
+    "maxConnReceiveWindow": 33554432
+  },
+  "socks5": {
+    "listen": "127.0.0.1:5678"
+  }
+}
+EOF
+    fi
+
+    # URL编码密码
+    encoded_pwd=$(urlencode "$auth_pwd")
+    
+    # 生成订阅链接 - 按照标准格式
+    if [[ -n $firstport && -n $endport ]]; then
+        # 端口跳跃模式
+        url="hysteria2://${encoded_pwd}@${last_ip}:${port}?security=tls&mportHopInt=${hop_interval:-25}&insecure=${insecure}&mport=${firstport}-${endport}&sni=${hy_domain}#Hysteria2"
+    else
+        # 单端口模式
+        url="hysteria2://${encoded_pwd}@${last_ip}:${port}?security=tls&insecure=${insecure}&sni=${hy_domain}#Hysteria2"
+    fi
+    
+    echo "$url" > /root/hy/url.txt
+
+    if [[ -n $firstport && -n $endport ]]; then
+        cat << EOF > /root/hy/clash-verge-line.yaml
+- {name: "Hysteria2", type: hysteria2, server: "$last_ip", port: $port, ports: "$firstport-$endport", hop-interval: ${hop_interval:-25}, password: "$auth_pwd", sni: "$hy_domain", skip-cert-verify: $insecure_bool, udp: true}
+EOF
+    else
+        cat << EOF > /root/hy/clash-verge-line.yaml
+- {name: "Hysteria2", type: hysteria2, server: "$last_ip", port: $port, password: "$auth_pwd", sni: "$hy_domain", skip-cert-verify: $insecure_bool, udp: true}
+EOF
+    fi
+
+    if command -v qrencode >/dev/null 2>&1; then
+        qrencode -o /root/hy/nekobox-qr.png -s 8 -m 2 "$url"
+        qrencode -t ANSIUTF8 "$url" > /root/hy/nekobox-qr.txt
+    fi
 }
 
-
-check_service_status() {
-    log_step "检查服务状态..."
-    
-    if systemctl is-active --quiet hysteria2.service; then
-        log_info "Hysteria 2 服务运行正常"
+read_current_config(){
+    if [[ -f /etc/hysteria/config.yaml ]]; then
+        # 更准确的端口解析
+        port=$(grep "^listen:" /etc/hysteria/config.yaml | sed 's/listen://g' | sed 's/[[:space:]]//g' | sed 's/\[.*\]//g' | sed 's/://g')
+        cert_path=$(grep "cert:" /etc/hysteria/config.yaml | awk '{print $2}')
+        key_path=$(grep "key:" /etc/hysteria/config.yaml | awk '{print $2}')
+        auth_pwd=$(grep "password:" /etc/hysteria/config.yaml | awk '{print $2}' | sed 's/"//g')
+        
+        if grep -q "type: proxy" /etc/hysteria/config.yaml; then
+            masq_type="proxy"
+            proxysite=$(grep "url:" /etc/hysteria/config.yaml | sed 's/.*https:\/\///g' | sed 's/[[:space:]]//g')
+        else
+            masq_type="string"
+            proxysite=""
+        fi
+        
+        if grep -q "bandwidth:" /etc/hysteria/config.yaml; then
+            limit_bandwidth="yes"
+            bandwidth_value=$(grep "up:" /etc/hysteria/config.yaml | head -1 | awk '{print $2}')
+        else
+            limit_bandwidth="no"
+            bandwidth_value=""
+        fi
+        
+        if [[ -f /root/hy/hy-client.yaml ]]; then
+            hy_domain=$(grep "sni:" /root/hy/hy-client.yaml | awk '{print $2}')
+            # 读取跳跃间隔
+            hop_interval=$(grep "hopInterval:" /root/hy/hy-client.yaml | awk '{print $2}' | sed 's/s$//')
+            # 读取 insecure 设置
+            insecure_value=$(grep "insecure:" /root/hy/hy-client.yaml | awk '{print $2}')
+            if [[ $insecure_value == "true" ]]; then
+                insecure=1
+            else
+                insecure=0
+            fi
+        else
+            hy_domain=$(openssl x509 -in "$cert_path" -noout -subject 2>/dev/null | sed 's/.*CN = //;s/,.*//' | sed 's/.*CN=//;s/,.*//')
+            [[ -z $hy_domain ]] && hy_domain="www.apple.com"
+            hop_interval=25
+            # 如果是 apple.com 则认为是自签证书
+            if [[ $hy_domain == "www.apple.com" ]]; then
+                insecure=1
+            else
+                insecure=0
+            fi
+        fi
+        
+        # 使用兼容的方式检测端口跳跃规则
+        port_hop_rule=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep "dpts:" | head -1)
+        if [[ -n $port_hop_rule ]]; then
+            # 提取端口范围，如 "dpts:2500:2575"
+            port_range=$(echo "$port_hop_rule" | grep -o 'dpts:[0-9]*:[0-9]*' | sed 's/dpts://')
+            if [[ -n $port_range ]]; then
+                firstport=$(echo "$port_range" | cut -d: -f1)
+                endport=$(echo "$port_range" | cut -d: -f2)
+            else
+                firstport=""
+                endport=""
+            fi
+        else
+            firstport=""
+            endport=""
+        fi
+        
         return 0
     else
-        log_error "Hysteria 2 服务启动失败"
-        systemctl status hysteria2.service
         return 1
     fi
 }
 
-# 输出连接信息
-output_connection_info() {
-    log_step "生成连接信息..."
-    
-    local server_ip=$(get_server_ip)
-    local password=$(cat /tmp/hy2_password)
-    local connection_url="hysteria2://$password@$server_ip:443/?insecure=1&sni=www.apple.com#HY2-Server"
-    
-    echo ""
-    echo "========================================"
-    echo -e "${GREEN}Hysteria 2 安装配置完成!${NC}"
-    echo "========================================"
-    echo ""
-    echo -e "${BLUE}服务器信息:${NC}"
-    echo "服务器IP: $server_ip"
-    echo "端口: 443"
-    echo "密码: $password"
-    echo "伪装URL: https://www.apple.com/"
-    echo "端口跳跃: 已启用"
-    echo ""
-    echo -e "${BLUE}连接链接:${NC}"
-    echo "$connection_url"
-    echo ""
-    
-    # 生成二维码
-    generate_qrcode "$connection_url"
-    
-    echo -e "${BLUE}客户端配置信息:${NC}"
-    cat << EOF
-server: $server_ip:443
-auth: $password
-tls:
-  sni: www.apple.com
-  insecure: true
-EOF
-    echo ""
-    echo -e "${YELLOW}注意事项:${NC}"
-    echo "1. 请妥善保存上述连接信息"
-    echo "2. 服务已设置为开机自启动"
-    echo "3. 如需重启服务: systemctl restart hysteria2"
-    echo "4. 查看服务状态: systemctl status hysteria2"
-    echo "5. 查看服务日志: journalctl -u hysteria2 -f"
-    echo ""
-    echo -e "${RED}重要提醒:${NC}"
-    echo "• 请合法合规使用，遵守当地法律法规"
-    echo "• 本工具仅供学习和技术研究使用"
-    echo "• 作者不承担任何使用后果和法律责任"
-    echo ""
-    
-    # 清理临时文件
-    rm -f /tmp/hy2_password
-}
-
-main() {
-    case "${1:-}" in
-        -start)
-            check_root
-            start_service
-            exit 0
-            ;;
-        -stop)
-            check_root
-            stop_service
-            exit 0
-            ;;
-        -status)
-            show_status
-            exit 0
-            ;;
-        "")
-            # 默认执行安装流程
-            show_disclaimer
-            ;;
-        *)
-            echo "用法: $0 [-start|-stop|-status]"
-            echo "  无参数    - 安装或重新安装Hysteria 2"
-            echo "  -start    - 启动Hysteria 2服务"
-            echo "  -stop     - 停止Hysteria 2服务"
-            echo "  -status   - 查看Hysteria 2服务状态"
-            exit 1
-            ;;
-    esac
-    
-    log_info "开始安装和配置Hysteria 2..."
-    
-    check_root
-    check_system
-    
-    # 检查是否已安装，如果已安装则询问是否重新安装
-    if check_installation; then
-        ask_reinstall
-    fi
-    
-    update_system
-    install_hysteria2
-    generate_certificate
-    configure_hysteria2
-    create_systemd_service
-    configure_firewall
-    
-    # 等待服务启动
-    sleep 3
-    
-    if check_service_status; then
-        output_connection_info
-        log_info "安装完成! 请查看上方的连接信息"
+insthysteria(){
+    warpv6=$(curl -s6m8 https://www.cloudflare.com/cdn-cgi/trace -k | grep warp | cut -d= -f2)
+    warpv4=$(curl -s4m8 https://www.cloudflare.com/cdn-cgi/trace -k | grep warp | cut -d= -f2)
+    if [[ $warpv4 =~ on|plus || $warpv6 =~ on|plus ]]; then
+        wg-quick down wgcf >/dev/null 2>&1
+        systemctl stop warp-go >/dev/null 2>&1
+        realip
+        systemctl start warp-go >/dev/null 2>&1
+        wg-quick up wgcf >/dev/null 2>&1
     else
-        log_error "安装过程中出现错误，请检查日志"
+        realip
+    fi
+
+    if [[ ! ${SYSTEM} == "CentOS" ]]; then
+        ${PACKAGE_UPDATE[int]}
+    fi
+    ${PACKAGE_INSTALL[int]} curl wget sudo qrencode procps openssl
+
+    install_iptables_persistent
+
+    wget -N https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/install_server.sh
+    bash install_server.sh
+    rm -f install_server.sh
+
+    if [[ ! -f /usr/local/bin/hysteria ]]; then
+        red "Hysteria 2 安装失败！"
         exit 1
     fi
+
+    inst_cert
+    inst_port_config
+    inst_pwd
+    inst_site
+    inst_bandwidth
+    generate_config
+    generate_client_config
+
+    fix_permissions
+
+    systemctl daemon-reload
+    systemctl enable hysteria-server
+    
+    echo "正在等待网络环境就绪..."
+    sleep 5
+    systemctl start hysteria-server
+    
+    if [[ ! -f /usr/bin/hy2 ]]; then
+        cp -f "$0" /usr/bin/hy2
+        chmod +x /usr/bin/hy2
+    fi
+
+    sleep 2
+    if [[ -n $(systemctl status hysteria-server 2>/dev/null | grep -w active) && -f '/etc/hysteria/config.yaml' ]]; then
+        green "Hysteria 2 服务启动成功"
+    else
+        red "Hysteria 2 服务启动失败，请检查日志：journalctl -u hysteria-server -e" && exit 1
+    fi
+    red "======================================================================================"
+    green "Hysteria 2 代理服务安装完成"
+    
+    green "======================================================================================"
+    green "               管理命令：${YELLOW}hy2${GREEN} (直接输入 hy2 即可)"
+    green "        输入 ${YELLOW}hy2${GREEN} 即可再次召唤本主界面，进行配置管理"
+    green "======================================================================================"
+    
+    yellow "Hysteria 2 客户端 YAML 配置文件 hy-client.yaml 内容如下"
+    red "$(cat /root/hy/hy-client.yaml)"
+    yellow "Hysteria 2 客户端 JSON 配置文件 hy-client.json 内容如下"
+    red "$(cat /root/hy/hy-client.json)"
+    yellow "Hysteria 2 节点分享链接如下"
+    red "$(cat /root/hy/url.txt)"
+    if [[ -f /root/hy/clash-verge-line.yaml ]]; then
+        yellow "Clash Verge YAML 单行节点（粘贴到 proxies: 下）如下"
+        red "$(cat /root/hy/clash-verge-line.yaml)"
+    fi
+    if [[ -f /root/hy/nekobox-qr.png ]]; then
+        yellow "NekoBox 扫码二维码图片：/root/hy/nekobox-qr.png"
+    fi
+    if [[ -f /root/hy/nekobox-qr.txt ]]; then
+        yellow "NekoBox 扫码二维码（终端预览）如下"
+        cat /root/hy/nekobox-qr.txt
+    fi
 }
-trap 'log_error "脚本执行过程中发生错误，退出码: $?"' ERR
-main "$@"
+
+unsthysteria(){
+    systemctl stop hysteria-server.service >/dev/null 2>&1
+    systemctl disable hysteria-server.service >/dev/null 2>&1
+    rm -f /lib/systemd/system/hysteria-server.service /lib/systemd/system/hysteria-server@.service
+    rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-server@.service
+    rm -rf /usr/local/bin/hysteria /etc/hysteria /root/hy /root/hysteria.sh
+    rm -f /usr/bin/hy2
+    iptables -t nat -F PREROUTING >/dev/null 2>&1
+    ip6tables -t nat -F PREROUTING >/dev/null 2>&1
+    save_iptables_rules
+    systemctl daemon-reload
+    green "Hysteria 2 已彻底卸载完成！"
+}
+
+starthysteria(){
+    systemctl start hysteria-server
+    systemctl enable hysteria-server >/dev/null 2>&1
+    if [[ -n $(systemctl status hysteria-server 2>/dev/null | grep -w active) ]]; then
+        green "Hysteria 2 启动成功"
+    else
+        red "Hysteria 2 启动失败，请查看日志：journalctl -u hysteria-server -e"
+    fi
+}
+
+stophysteria(){
+    systemctl stop hysteria-server
+    systemctl disable hysteria-server >/dev/null 2>&1
+    green "Hysteria 2 已停止"
+}
+
+hysteriaswitch(){
+    yellow "请选择你需要的操作："
+    echo ""
+    echo -e " ${GREEN}1.${PLAIN} 启动 Hysteria 2"
+    echo -e " ${GREEN}2.${PLAIN} 关闭 Hysteria 2"
+    echo -e " ${GREEN}3.${PLAIN} 重启 Hysteria 2"
+    echo ""
+    read -rp "请输入选项 [1-3]: " switchInput
+    case $switchInput in
+        1 ) starthysteria ;;
+        2 ) stophysteria ;;
+        3 ) stophysteria && starthysteria ;;
+        * ) exit 1 ;;
+    esac
+}
+
+changebandwidth(){
+    if ! read_current_config; then
+        red "未找到配置文件，请先安装 Hysteria 2"
+        return 1
+    fi
+    
+    echo ""
+    green "请选择是否开启带宽限速 (推荐开启以防止阻断)："
+    echo -e " ${GREEN}1.${PLAIN} 开启 100 Mbps 限制"
+    echo -e " ${GREEN}2.${PLAIN} 自定义限速数值"
+    echo -e " ${GREEN}3.${PLAIN} 关闭限速 (不限制)"
+    echo ""
+    read -rp "请输入选项 [1-3]: " bwChange
+    
+    if [[ $bwChange == 1 ]]; then
+        limit_bandwidth="yes"
+        bandwidth_value="100"
+        yellow "已设置为：100 Mbps 限速"
+    elif [[ $bwChange == 2 ]]; then
+        read -p "请输入限速数值 (单位 mbps，例如 50): " custBw
+        [[ -z $custBw ]] && custBw=100
+        limit_bandwidth="yes"
+        bandwidth_value="$custBw"
+        yellow "已设置为：$custBw Mbps 限速"
+    else
+        limit_bandwidth="no"
+        bandwidth_value=""
+        yellow "已关闭带宽限制"
+    fi
+
+    generate_config
+    fix_permissions
+    stophysteria && starthysteria
+    green "带宽限制配置已更新！"
+}
+
+changeport(){
+    if ! read_current_config; then
+        red "未找到配置文件，请先安装 Hysteria 2"
+        return 1
+    fi
+    inst_port_config
+    generate_config
+    generate_client_config
+    fix_permissions
+    stophysteria && starthysteria
+    green "Hysteria 2 端口配置已更新！"
+    showconf
+}
+
+changepasswd(){
+    if ! read_current_config; then
+        red "未找到配置文件，请先安装 Hysteria 2"
+        return 1
+    fi
+    read -p "设置 Hysteria 2 密码（回车自动生成32位随机密码）：" new_pwd
+    [[ -z $new_pwd ]] && new_pwd=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
+    auth_pwd=$new_pwd
+    generate_config
+    generate_client_config
+    fix_permissions
+    stophysteria && starthysteria
+    green "Hysteria 2 节点密码已成功修改为：$auth_pwd"
+    showconf
+}
+
+change_cert(){
+    if ! read_current_config; then
+        red "未找到配置文件，请先安装 Hysteria 2"
+        return 1
+    fi
+    inst_cert
+    generate_config
+    generate_client_config
+    fix_permissions
+    stophysteria && starthysteria
+    green "Hysteria 2 节点证书类型已成功修改"
+    showconf
+}
+
+changeproxysite(){
+    if ! read_current_config; then
+        red "未找到配置文件，请先安装 Hysteria 2"
+        return 1
+    fi
+    inst_site
+    generate_config
+    fix_permissions
+    stophysteria && starthysteria
+    green "Hysteria 2 节点伪装形式已修改成功！"
+}
+
+changeconf(){
+    green "Hysteria 2 配置变更选择如下:"
+    echo -e " ${GREEN}1.${PLAIN} 修改端口 (重新配置)"
+    echo -e " ${GREEN}2.${PLAIN} 修改密码"
+    echo -e " ${GREEN}3.${PLAIN} 修改证书类型"
+    echo -e " ${GREEN}4.${PLAIN} 修改伪装形式"
+    echo -e " ${GREEN}5.${PLAIN} 编辑带宽限速"
+    echo ""
+    read -p " 请选择操作 [1-5]：" confAnswer
+    case $confAnswer in
+        1 ) changeport ;;
+        2 ) changepasswd ;;
+        3 ) change_cert ;;
+        4 ) changeproxysite ;;
+        5 ) changebandwidth ;;
+        * ) exit 1 ;;
+    esac
+}
+
+showconf(){
+    if [[ ! -f /root/hy/hy-client.yaml ]]; then
+        red "未找到客户端配置文件，请先安装 Hysteria 2"
+        return 1
+    fi
+    yellow "Hysteria 2 客户端 YAML 配置文件 hy-client.yaml 内容如下"
+    red "$(cat /root/hy/hy-client.yaml)"
+    yellow "Hysteria 2 客户端 JSON 配置文件 hy-client.json 内容如下"
+    red "$(cat /root/hy/hy-client.json)"
+    yellow "Hysteria 2 节点分享链接如下"
+    red "$(cat /root/hy/url.txt)"
+    if [[ -f /root/hy/clash-verge-line.yaml ]]; then
+        yellow "Clash Verge YAML 单行节点（粘贴到 proxies: 下）如下"
+        red "$(cat /root/hy/clash-verge-line.yaml)"
+    fi
+    if [[ -f /root/hy/nekobox-qr.png ]]; then
+        yellow "NekoBox 扫码二维码图片：/root/hy/nekobox-qr.png"
+    fi
+    if [[ -f /root/hy/nekobox-qr.txt ]]; then
+        yellow "NekoBox 扫码二维码（终端预览）如下"
+        cat /root/hy/nekobox-qr.txt
+    fi
+}
+
+menu() {
+    clear
+    echo "#############################################################"
+    echo -e "#                  ${GREEN}Hysteria 2 一键安装脚本${PLAIN}                  #"
+    echo "#############################################################"
+    echo ""
+    echo -e " ${GREEN}1.${PLAIN} ${GREEN}安装 Hysteria 2${PLAIN}"
+    echo -e " ${RED}2.${PLAIN} ${RED}卸载 Hysteria 2${PLAIN}"
+    echo " ------------------------------------------------------------"
+    echo -e " 3. 关闭、开启、重启 Hysteria 2"
+    echo -e " 4. 修改 Hysteria 2 配置"
+    echo -e " 5. 显示 Hysteria 2 配置文件"
+    echo " ------------------------------------------------------------"
+    echo -e " 0. 退出脚本"
+    echo ""
+    read -rp "请输入选项 [0-5]: " menuInput
+    case $menuInput in
+        1 ) insthysteria ;;
+        2 ) unsthysteria ;;
+        3 ) hysteriaswitch ;;
+        4 ) changeconf ;;
+        5 ) showconf ;;
+        0 ) exit 0 ;;
+        * ) exit 1 ;;
+    esac
+}
+
+menu
+
