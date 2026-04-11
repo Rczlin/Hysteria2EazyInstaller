@@ -23,6 +23,11 @@ REGEX=("debian" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "amazon
 RELEASE=("Debian" "Ubuntu" "CentOS" "CentOS" "Fedora")
 PACKAGE_UPDATE=("apt-get update" "apt-get update" "yum -y update" "yum -y update" "yum -y update")
 PACKAGE_INSTALL=("apt -y install" "apt -y install" "yum -y install" "yum -y install" "yum -y install")
+client_yaml_output=""
+client_json_output=""
+client_url_output=""
+clash_line_output=""
+qr_text_output=""
 
 [[ $EUID -ne 0 ]] && red "注意: 请在root用户下运行脚本" && exit 1
 
@@ -282,10 +287,8 @@ generate_client_config(){
         insecure_bool="false"
     fi
 
-    mkdir -p /root/hy
-    
-    # 生成 YAML 客户端配置
-    cat << EOF > /root/hy/hy-client.yaml
+    # 生成 YAML 客户端配置（仅内存，不落盘）
+    client_yaml_output=$(cat << EOF
 server: $last_ip:$server_port_string
 
 auth: $auth_pwd
@@ -304,21 +307,20 @@ fastOpen: true
 
 socks5:
   listen: 127.0.0.1:5678
-
 EOF
+)
 
-    # 仅在端口跳跃模式下添加 transport 配置
     if [[ -n $firstport && -n $endport ]]; then
-        cat << EOF >> /root/hy/hy-client.yaml
+        client_yaml_output="${client_yaml_output}
+
 transport:
   udp:
-    hopInterval: ${hop_interval:-25}s
-EOF
+    hopInterval: ${hop_interval:-25}s"
     fi
     
-    # 生成 JSON 配置
+    # 生成 JSON 配置（仅内存，不落盘）
     if [[ -n $firstport && -n $endport ]]; then
-        cat << EOF > /root/hy/hy-client.json
+        client_json_output=$(cat << EOF
 {
   "server": "$last_ip:$server_port_string",
   "auth": "$auth_pwd",
@@ -342,8 +344,9 @@ EOF
   }
 }
 EOF
+)
     else
-        cat << EOF > /root/hy/hy-client.json
+        client_json_output=$(cat << EOF
 {
   "server": "$last_ip:$server_port_string",
   "auth": "$auth_pwd",
@@ -362,6 +365,7 @@ EOF
   }
 }
 EOF
+)
     fi
 
     # URL编码密码
@@ -370,26 +374,21 @@ EOF
     # 生成订阅链接 - 按照标准格式
     if [[ -n $firstport && -n $endport ]]; then
         # 端口跳跃模式
-        url="hysteria2://${encoded_pwd}@${last_ip}:${port}?security=tls&mportHopInt=${hop_interval:-25}&insecure=${insecure}&mport=${firstport}-${endport}&sni=${hy_domain}#Hysteria2"
+        client_url_output="hysteria2://${encoded_pwd}@${last_ip}:${port}?security=tls&mportHopInt=${hop_interval:-25}&insecure=${insecure}&mport=${firstport}-${endport}&sni=${hy_domain}#Hysteria2"
     else
         # 单端口模式
-        url="hysteria2://${encoded_pwd}@${last_ip}:${port}?security=tls&insecure=${insecure}&sni=${hy_domain}#Hysteria2"
+        client_url_output="hysteria2://${encoded_pwd}@${last_ip}:${port}?security=tls&insecure=${insecure}&sni=${hy_domain}#Hysteria2"
     fi
-    
-    echo "$url" > /root/hy/url.txt
 
     if [[ -n $firstport && -n $endport ]]; then
-        cat << EOF > /root/hy/clash-verge-line.yaml
-- {name: "Hysteria2", type: hysteria2, server: "$last_ip", port: $port, ports: "$firstport-$endport", hop-interval: ${hop_interval:-25}, password: "$auth_pwd", sni: "$hy_domain", skip-cert-verify: $insecure_bool, udp: true}
-EOF
+        clash_line_output="- {name: \"Hysteria2\", type: hysteria2, server: \"$last_ip\", port: $port, ports: \"$firstport-$endport\", hop-interval: ${hop_interval:-25}, password: \"$auth_pwd\", sni: \"$hy_domain\", skip-cert-verify: $insecure_bool, udp: true}"
     else
-        cat << EOF > /root/hy/clash-verge-line.yaml
-- {name: "Hysteria2", type: hysteria2, server: "$last_ip", port: $port, password: "$auth_pwd", sni: "$hy_domain", skip-cert-verify: $insecure_bool, udp: true}
-EOF
+        clash_line_output="- {name: \"Hysteria2\", type: hysteria2, server: \"$last_ip\", port: $port, password: \"$auth_pwd\", sni: \"$hy_domain\", skip-cert-verify: $insecure_bool, udp: true}"
     fi
 
+    qr_text_output=""
     if command -v qrencode >/dev/null 2>&1; then
-        qrencode -t ANSIUTF8 "$url" > /root/hy/nekobox-qr.txt
+        qr_text_output=$(qrencode -t ANSIUTF8 "$client_url_output")
     fi
 }
 
@@ -417,27 +416,14 @@ read_current_config(){
             bandwidth_value=""
         fi
         
-        if [[ -f /root/hy/hy-client.yaml ]]; then
-            hy_domain=$(grep "sni:" /root/hy/hy-client.yaml | awk '{print $2}')
-            # 读取跳跃间隔
-            hop_interval=$(grep "hopInterval:" /root/hy/hy-client.yaml | awk '{print $2}' | sed 's/s$//')
-            # 读取 insecure 设置
-            insecure_value=$(grep "insecure:" /root/hy/hy-client.yaml | awk '{print $2}')
-            if [[ $insecure_value == "true" ]]; then
-                insecure=1
-            else
-                insecure=0
-            fi
+        hy_domain=$(openssl x509 -in "$cert_path" -noout -subject 2>/dev/null | sed 's/.*CN = //;s/,.*//' | sed 's/.*CN=//;s/,.*//')
+        [[ -z $hy_domain ]] && hy_domain="www.apple.com"
+        hop_interval=25
+        # 如果是 apple.com 则认为是自签证书
+        if [[ $hy_domain == "www.apple.com" ]]; then
+            insecure=1
         else
-            hy_domain=$(openssl x509 -in "$cert_path" -noout -subject 2>/dev/null | sed 's/.*CN = //;s/,.*//' | sed 's/.*CN=//;s/,.*//')
-            [[ -z $hy_domain ]] && hy_domain="www.apple.com"
-            hop_interval=25
-            # 如果是 apple.com 则认为是自签证书
-            if [[ $hy_domain == "www.apple.com" ]]; then
-                insecure=1
-            else
-                insecure=0
-            fi
+            insecure=0
         fi
         
         # 使用兼容的方式检测端口跳跃规则
@@ -569,6 +555,34 @@ WantedBy=multi-user.target
 EOF
 }
 
+install_hy2_command(){
+    local source_script=""
+
+    if [[ -n ${BASH_SOURCE[0]} && -f ${BASH_SOURCE[0]} ]]; then
+        source_script="${BASH_SOURCE[0]}"
+    elif [[ -n $0 && -f $0 ]]; then
+        source_script="$0"
+    fi
+
+    if [[ $source_script == /dev/fd/* || $source_script == /proc/*/fd/* ]]; then
+        red "当前脚本来自管道输入，无法安全覆盖 /usr/bin/hy2，请先保存为本地脚本再运行"
+        return 1
+    fi
+
+    if [[ -z $source_script || ! -s $source_script ]]; then
+        red "当前脚本来源不可用或为空，无法覆盖安装 /usr/bin/hy2，请使用本地脚本文件运行"
+        return 1
+    fi
+
+    cp -f "$source_script" /usr/bin/hy2
+    chmod +x /usr/bin/hy2
+
+    if [[ ! -s /usr/bin/hy2 ]]; then
+        red "/usr/bin/hy2 覆盖失败或文件为空"
+        return 1
+    fi
+}
+
 insthysteria(){
     warpv6=$(curl -s6m8 https://www.cloudflare.com/cdn-cgi/trace -k | grep warp | cut -d= -f2)
     warpv4=$(curl -s4m8 https://www.cloudflare.com/cdn-cgi/trace -k | grep warp | cut -d= -f2)
@@ -614,9 +628,8 @@ insthysteria(){
     sleep 5
     systemctl start hysteria-server
     
-    if [[ ! -f /usr/bin/hy2 ]]; then
-        cp -f "$0" /usr/bin/hy2
-        chmod +x /usr/bin/hy2
+    if ! install_hy2_command; then
+        exit 1
     fi
 
     sleep 2
@@ -633,19 +646,19 @@ insthysteria(){
     green "        输入 ${YELLOW}hy2${GREEN} 即可再次召唤本主界面，进行配置管理"
     green "======================================================================================"
     
-    yellow "Hysteria 2 客户端 YAML 配置文件 hy-client.yaml 内容如下"
-    red "$(cat /root/hy/hy-client.yaml)"
-    yellow "Hysteria 2 客户端 JSON 配置文件 hy-client.json 内容如下"
-    red "$(cat /root/hy/hy-client.json)"
+    yellow "Hysteria 2 客户端 YAML 配置如下"
+    red "$client_yaml_output"
+    yellow "Hysteria 2 客户端 JSON 配置如下"
+    red "$client_json_output"
     yellow "Hysteria 2 节点分享链接如下"
-    red "$(cat /root/hy/url.txt)"
-    if [[ -f /root/hy/clash-verge-line.yaml ]]; then
+    red "$client_url_output"
+    if [[ -n $clash_line_output ]]; then
         yellow "Clash Verge YAML 单行节点（粘贴到 proxies: 下）如下"
-        red "$(cat /root/hy/clash-verge-line.yaml)"
+        red "$clash_line_output"
     fi
-    if [[ -f /root/hy/nekobox-qr.txt ]]; then
+    if [[ -n $qr_text_output ]]; then
         yellow "NekoBox 扫码二维码（终端预览）如下"
-        cat /root/hy/nekobox-qr.txt
+        echo "$qr_text_output"
     fi
 }
 
@@ -807,23 +820,24 @@ changeconf(){
 }
 
 showconf(){
-    if [[ ! -f /root/hy/hy-client.yaml ]]; then
-        red "未找到客户端配置文件，请先安装 Hysteria 2"
+    if ! read_current_config; then
+        red "未找到配置文件，请先安装 Hysteria 2"
         return 1
     fi
-    yellow "Hysteria 2 客户端 YAML 配置文件 hy-client.yaml 内容如下"
-    red "$(cat /root/hy/hy-client.yaml)"
-    yellow "Hysteria 2 客户端 JSON 配置文件 hy-client.json 内容如下"
-    red "$(cat /root/hy/hy-client.json)"
+    generate_client_config
+    yellow "Hysteria 2 客户端 YAML 配置如下"
+    red "$client_yaml_output"
+    yellow "Hysteria 2 客户端 JSON 配置如下"
+    red "$client_json_output"
     yellow "Hysteria 2 节点分享链接如下"
-    red "$(cat /root/hy/url.txt)"
-    if [[ -f /root/hy/clash-verge-line.yaml ]]; then
+    red "$client_url_output"
+    if [[ -n $clash_line_output ]]; then
         yellow "Clash Verge YAML 单行节点（粘贴到 proxies: 下）如下"
-        red "$(cat /root/hy/clash-verge-line.yaml)"
+        red "$clash_line_output"
     fi
-    if [[ -f /root/hy/nekobox-qr.txt ]]; then
+    if [[ -n $qr_text_output ]]; then
         yellow "NekoBox 扫码二维码（终端预览）如下"
-        cat /root/hy/nekobox-qr.txt
+        echo "$qr_text_output"
     fi
 }
 
