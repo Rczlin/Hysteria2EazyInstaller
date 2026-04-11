@@ -676,6 +676,24 @@ unsthysteria(){
     green "Hysteria 2 已彻底卸载完成！"
 }
 
+registerhy2(){
+    if install_hy2_command; then
+        green "hy2 命令已成功注册到 /usr/bin/hy2（已强制覆盖）"
+    else
+        red "hy2 命令注册失败"
+        return 1
+    fi
+}
+
+unregisterhy2(){
+    if [[ -f /usr/bin/hy2 ]]; then
+        rm -f /usr/bin/hy2
+        green "hy2 命令已卸载"
+    else
+        yellow "hy2 命令不存在，无需卸载"
+    fi
+}
+
 starthysteria(){
     systemctl start hysteria-server
     systemctl enable hysteria-server >/dev/null 2>&1
@@ -853,16 +871,20 @@ menu() {
     echo -e " 3. 关闭、开启、重启 Hysteria 2"
     echo -e " 4. 修改 Hysteria 2 配置"
     echo -e " 5. 显示 Hysteria 2 配置文件"
+    echo -e " 6. 单独注册 hy2 命令（强制覆盖）"
+    echo -e " 7. 单独卸载 hy2 命令"
     echo " ------------------------------------------------------------"
     echo -e " 0. 退出脚本"
     echo ""
-    read -rp "请输入选项 [0-5]: " menuInput
+    read -rp "请输入选项 [0-7]: " menuInput
     case $menuInput in
         1 ) insthysteria ;;
         2 ) unsthysteria ;;
         3 ) hysteriaswitch ;;
         4 ) changeconf ;;
         5 ) showconf ;;
+        6 ) registerhy2 ;;
+        7 ) unregisterhy2 ;;
         0 ) exit 0 ;;
         * ) exit 1 ;;
     esac
