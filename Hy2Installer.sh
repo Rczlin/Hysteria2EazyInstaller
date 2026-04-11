@@ -174,24 +174,9 @@ inst_site(){
 }
 
 inst_bandwidth(){
-    echo ""
-    green "设置服务端带宽限制 (速度限制)："
-    echo -e " ${GREEN}1.${PLAIN} 开启 100 Mbps 限制 ${YELLOW}（默认，推荐）${PLAIN}"
-    echo -e "    ${PLAIN}说明：${GREEN}100M 对于 4K 视频绰绰有余。${PLAIN}保持带宽克制能显著降低被运营商QoS(限速)或阻断的风险，使连接更持久稳定。"
-    echo -e " ${GREEN}2.${PLAIN} 不限制带宽 (不推荐)"
-    echo ""
-    
-    read -rp "请输入选项 [1-2]: " bwInput
-    
-    if [[ $bwInput == 2 ]]; then
-        limit_bandwidth="no"
-        bandwidth_value=""
-        yellow "已选择：不限制带宽"
-    else
-        limit_bandwidth="yes"
-        bandwidth_value="100"
-        yellow "已选择：限制服务端带宽为 100 Mbps (上下行)"
-    fi
+    limit_bandwidth="no"
+    bandwidth_value=""
+    yellow "已默认使用：不限制带宽模式"
 }
 
 generate_config(){
@@ -404,7 +389,6 @@ EOF
     fi
 
     if command -v qrencode >/dev/null 2>&1; then
-        qrencode -o /root/hy/nekobox-qr.png -s 8 -m 2 "$url"
         qrencode -t ANSIUTF8 "$url" > /root/hy/nekobox-qr.txt
     fi
 }
@@ -479,6 +463,112 @@ read_current_config(){
     fi
 }
 
+get_hysteria_latest_version(){
+    local latest_version
+    latest_version=$(curl -fsSL "https://api.github.com/repos/apernet/hysteria/releases/latest" \
+        | grep '"tag_name"' \
+        | head -1 \
+        | sed -E 's/.*"tag_name":[[:space:]]*"app\/([^"]+)".*/\1/')
+
+    if [[ -z $latest_version ]]; then
+        red "获取 Hysteria 最新版本失败，请检查网络后重试"
+        exit 1
+    fi
+
+    echo "$latest_version"
+}
+
+install_hysteria_binary(){
+    local machine hy_arch version bin_url tmp_bin
+    machine=$(uname -m)
+    case "$machine" in
+        i386|i686) hy_arch="386" ;;
+        x86_64|amd64) hy_arch="amd64" ;;
+        armv5tel|armv6l|armv7|armv7l) hy_arch="arm" ;;
+        armv8|aarch64|arm64) hy_arch="arm64" ;;
+        mips|mipsle|mips64|mips64le) hy_arch="mipsle" ;;
+        s390x) hy_arch="s390x" ;;
+        *)
+            red "不支持的 CPU 架构：$machine"
+            exit 1
+            ;;
+    esac
+
+    version=$(get_hysteria_latest_version)
+    bin_url="https://github.com/apernet/hysteria/releases/download/app/${version}/hysteria-linux-${hy_arch}"
+    tmp_bin="/tmp/hysteria-linux-${hy_arch}"
+
+    rm -f "$tmp_bin"
+    if ! curl -fsSL --connect-timeout 15 -o "$tmp_bin" "$bin_url"; then
+        red "下载 Hysteria 2 二进制失败：$bin_url"
+        exit 1
+    fi
+
+    chmod +x "$tmp_bin"
+    mv -f "$tmp_bin" /usr/local/bin/hysteria
+
+    if ! /usr/local/bin/hysteria version >/dev/null 2>&1; then
+        red "Hysteria 2 二进制校验失败，请重试"
+        exit 1
+    fi
+
+    green "已安装 Hysteria 2 版本：$version"
+}
+
+install_hysteria_service(){
+    if ! id "hysteria" &>/dev/null; then
+        useradd -r -d /var/lib/hysteria -m hysteria
+    fi
+
+    cat > /etc/systemd/system/hysteria-server.service << EOF
+[Unit]
+Description=Hysteria 2 Server Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/hysteria
+User=hysteria
+Group=hysteria
+Environment=HYSTERIA_LOG_LEVEL=info
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    cat > /etc/systemd/system/hysteria-server@.service << EOF
+[Unit]
+Description=Hysteria 2 Server Service (%i.yaml)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/hysteria
+User=hysteria
+Group=hysteria
+Environment=HYSTERIA_LOG_LEVEL=info
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/%i.yaml
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
 insthysteria(){
     warpv6=$(curl -s6m8 https://www.cloudflare.com/cdn-cgi/trace -k | grep warp | cut -d= -f2)
     warpv4=$(curl -s4m8 https://www.cloudflare.com/cdn-cgi/trace -k | grep warp | cut -d= -f2)
@@ -495,13 +585,12 @@ insthysteria(){
     if [[ ! ${SYSTEM} == "CentOS" ]]; then
         ${PACKAGE_UPDATE[int]}
     fi
-    ${PACKAGE_INSTALL[int]} curl wget sudo qrencode procps openssl
+    ${PACKAGE_INSTALL[int]} curl sudo qrencode procps openssl
 
     install_iptables_persistent
 
-    wget -N https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/install_server.sh
-    bash install_server.sh
-    rm -f install_server.sh
+    install_hysteria_binary
+    install_hysteria_service
 
     if [[ ! -f /usr/local/bin/hysteria ]]; then
         red "Hysteria 2 安装失败！"
@@ -553,9 +642,6 @@ insthysteria(){
     if [[ -f /root/hy/clash-verge-line.yaml ]]; then
         yellow "Clash Verge YAML 单行节点（粘贴到 proxies: 下）如下"
         red "$(cat /root/hy/clash-verge-line.yaml)"
-    fi
-    if [[ -f /root/hy/nekobox-qr.png ]]; then
-        yellow "NekoBox 扫码二维码图片：/root/hy/nekobox-qr.png"
     fi
     if [[ -f /root/hy/nekobox-qr.txt ]]; then
         yellow "NekoBox 扫码二维码（终端预览）如下"
@@ -735,9 +821,6 @@ showconf(){
         yellow "Clash Verge YAML 单行节点（粘贴到 proxies: 下）如下"
         red "$(cat /root/hy/clash-verge-line.yaml)"
     fi
-    if [[ -f /root/hy/nekobox-qr.png ]]; then
-        yellow "NekoBox 扫码二维码图片：/root/hy/nekobox-qr.png"
-    fi
     if [[ -f /root/hy/nekobox-qr.txt ]]; then
         yellow "NekoBox 扫码二维码（终端预览）如下"
         cat /root/hy/nekobox-qr.txt
@@ -772,4 +855,3 @@ menu() {
 }
 
 menu
-
