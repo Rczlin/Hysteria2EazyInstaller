@@ -17,13 +17,13 @@
 ## 使用
 Used:
 ```
-bash <(curl -sL https://raw.githubusercontent.com/Rczlin/Hysteria2EazyInstaller/refs/heads/main/Hy2Installer.sh)
+curl -sL https://raw.githubusercontent.com/Rczlin/Hysteria2EazyInstaller/refs/heads/main/Hy2Installer.sh -o Hy2Installer.sh && bash Hy2Installer.sh
 ```
 IPV4
 ```
-bash <(curl --ipv4 -sL https://raw.githubusercontent.com/Rczlin/Hysteria2EazyInstaller/refs/heads/main/Hy2Installer.sh)
+curl --ipv4 -sL https://raw.githubusercontent.com/Rczlin/Hysteria2EazyInstaller/refs/heads/main/Hy2Installer.sh -o Hy2Installer.sh && bash Hy2Installer.sh
 ```
 IPV6
 ```
-bash <(curl --ipv6 -sL https://raw.githubusercontent.com/Rczlin/Hysteria2EazyInstaller/refs/heads/main/Hy2Installer.sh)
+curl --ipv6 -sL https://raw.githubusercontent.com/Rczlin/Hysteria2EazyInstaller/refs/heads/main/Hy2Installer.sh -o Hy2Installer.sh && bash Hy2Installer.sh
 ```
