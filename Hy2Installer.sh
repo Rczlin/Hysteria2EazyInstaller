@@ -78,35 +78,6 @@ realip(){
     ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
 }
 
-save_iptables_rules(){
-    if [[ $SYSTEM == "CentOS" ]]; then
-        if [[ -f /usr/libexec/iptables/iptables.init ]]; then
-            service iptables save >/dev/null 2>&1
-            service ip6tables save >/dev/null 2>&1
-        else
-            iptables-save > /etc/sysconfig/iptables 2>/dev/null
-            ip6tables-save > /etc/sysconfig/ip6tables 2>/dev/null
-        fi
-    else
-        netfilter-persistent save >/dev/null 2>&1
-    fi
-}
-
-install_iptables_persistent(){
-    if [[ $SYSTEM == "CentOS" ]]; then
-        ${PACKAGE_INSTALL[int]} iptables-services
-        systemctl enable iptables >/dev/null 2>&1
-        systemctl enable ip6tables >/dev/null 2>&1
-        systemctl start iptables >/dev/null 2>&1
-        systemctl start ip6tables >/dev/null 2>&1
-    else
-        # 非交互式安装 iptables-persistent
-        echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null
-        echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null
-        DEBIAN_FRONTEND=noninteractive ${PACKAGE_INSTALL[int]} iptables-persistent netfilter-persistent
-    fi
-}
-
 fix_permissions(){
     if id "hysteria" &>/dev/null; then
         chown -R hysteria:hysteria /etc/hysteria
@@ -137,34 +108,12 @@ inst_cert(){
 }
 
 inst_port_config(){
-    iptables -t nat -F PREROUTING >/dev/null 2>&1
-    ip6tables -t nat -F PREROUTING >/dev/null 2>&1
-
     firstport=30000
     endport=40000
+    port=$firstport
     hop_interval=25
 
-    port=""
-    for candidate_port in $(seq $firstport $endport); do
-        if [[ -z $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$candidate_port") ]]; then
-            port=$candidate_port
-            break
-        fi
-    done
-
-    if [[ -z $port ]]; then
-        red "30000-40000 范围内未找到可用 UDP 端口，请检查端口占用后重试"
-        exit 1
-    fi
-
-    iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j DNAT --to-destination :$port
-    ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j DNAT --to-destination :$port
-
-    iptables -I INPUT -p udp --dport $firstport:$endport -j ACCEPT
-    ip6tables -I INPUT -p udp --dport $firstport:$endport -j ACCEPT
-    save_iptables_rules
-
-    yellow "已启用端口跳跃：$firstport - $endport (主监听端口: $port, 跳跃间隔: ${hop_interval}s)"
+    yellow "已启用 Hysteria 2 原生端口跳跃：$firstport - $endport (跳跃间隔: ${hop_interval}s)"
 }
 
 inst_pwd(){
@@ -186,9 +135,14 @@ inst_bandwidth(){
 
 generate_config(){
     mkdir -p /etc/hysteria
+    if [[ -n $firstport && -n $endport ]]; then
+        listen_value=":${firstport}-${endport}"
+    else
+        listen_value=":$port"
+    fi
 
     cat << EOF > /etc/hysteria/config.yaml
-listen: :$port
+listen: $listen_value
 
 tls:
   cert: $cert_path
@@ -269,7 +223,7 @@ generate_client_config(){
     realip
     
     if [[ -n $firstport && -n $endport ]]; then
-        server_port_string="$port,$firstport-$endport"
+        server_port_string="$firstport-$endport"
     else
         server_port_string=$port
     fi
@@ -374,7 +328,7 @@ EOF
     # 生成订阅链接 - 按照标准格式
     if [[ -n $firstport && -n $endport ]]; then
         # 端口跳跃模式
-        client_url_output="hysteria2://${encoded_pwd}@${last_ip}:${port}?security=tls&mportHopInt=${hop_interval:-25}&insecure=${insecure}&mport=${firstport}-${endport}&sni=${hy_domain}#Hysteria2"
+        client_url_output="hysteria2://${encoded_pwd}@${last_ip}:${server_port_string}?security=tls&insecure=${insecure}&sni=${hy_domain}#Hysteria2"
     else
         # 单端口模式
         client_url_output="hysteria2://${encoded_pwd}@${last_ip}:${port}?security=tls&insecure=${insecure}&sni=${hy_domain}#Hysteria2"
@@ -394,8 +348,16 @@ EOF
 
 read_current_config(){
     if [[ -f /etc/hysteria/config.yaml ]]; then
-        # 更准确的端口解析
-        port=$(grep "^listen:" /etc/hysteria/config.yaml | sed 's/listen://g' | sed 's/[[:space:]]//g' | sed 's/\[.*\]//g' | sed 's/://g')
+        listen_value=$(grep "^listen:" /etc/hysteria/config.yaml | awk '{print $2}' | sed 's/[[:space:]]//g')
+        if [[ $listen_value =~ ^:?([0-9]+)-([0-9]+)$ ]]; then
+            firstport="${BASH_REMATCH[1]}"
+            endport="${BASH_REMATCH[2]}"
+            port=$firstport
+        else
+            port=$(echo "$listen_value" | sed 's/\[.*\]//g' | sed 's/://g')
+            firstport=""
+            endport=""
+        fi
         cert_path=$(grep "cert:" /etc/hysteria/config.yaml | awk '{print $2}')
         key_path=$(grep "key:" /etc/hysteria/config.yaml | awk '{print $2}')
         auth_pwd=$(grep "password:" /etc/hysteria/config.yaml | awk '{print $2}' | sed 's/"//g')
@@ -425,24 +387,7 @@ read_current_config(){
         else
             insecure=0
         fi
-        
-        # 使用兼容的方式检测端口跳跃规则
-        port_hop_rule=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep "dpts:" | head -1)
-        if [[ -n $port_hop_rule ]]; then
-            # 提取端口范围，如 "dpts:2500:2575"
-            port_range=$(echo "$port_hop_rule" | grep -o 'dpts:[0-9]*:[0-9]*' | sed 's/dpts://')
-            if [[ -n $port_range ]]; then
-                firstport=$(echo "$port_range" | cut -d: -f1)
-                endport=$(echo "$port_range" | cut -d: -f2)
-            else
-                firstport=""
-                endport=""
-            fi
-        else
-            firstport=""
-            endport=""
-        fi
-        
+
         return 0
     else
         return 1
@@ -599,9 +544,7 @@ insthysteria(){
     if [[ ! ${SYSTEM} == "CentOS" ]]; then
         ${PACKAGE_UPDATE[int]}
     fi
-    ${PACKAGE_INSTALL[int]} curl sudo qrencode procps openssl
-
-    install_iptables_persistent
+    ${PACKAGE_INSTALL[int]} qrencode openssl nftables
 
     install_hysteria_binary
     install_hysteria_service
@@ -669,9 +612,6 @@ unsthysteria(){
     rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-server@.service
     rm -rf /usr/local/bin/hysteria /etc/hysteria /root/hy /root/hysteria.sh
     rm -f /usr/bin/hy2
-    iptables -t nat -F PREROUTING >/dev/null 2>&1
-    ip6tables -t nat -F PREROUTING >/dev/null 2>&1
-    save_iptables_rules
     systemctl daemon-reload
     green "Hysteria 2 已彻底卸载完成！"
 }
