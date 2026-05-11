@@ -430,7 +430,7 @@ install_hysteria_binary(){
     tmp_bin="/tmp/hysteria-linux-${hy_arch}"
 
     rm -f "$tmp_bin"
-    if ! curl -fsSL --connect-timeout 15 -o "$tmp_bin" "$bin_url"; then
+    if ! curl -fL --progress-bar -o "$tmp_bin" "$bin_url"; then
         red "下载 Hysteria 2 二进制失败：$bin_url"
         exit 1
     fi
