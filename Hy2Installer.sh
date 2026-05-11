@@ -92,6 +92,35 @@ is_valid_port(){
     is_positive_integer "$1" && (( $1 <= 65535 ))
 }
 
+parse_port_config(){
+    local input_value="$1"
+    local start_port end_port single_port
+
+    input_value="${input_value//[[:space:]]/}"
+    if [[ $input_value =~ ^([0-9]+)[-~]([0-9]+)$ ]]; then
+        start_port="${BASH_REMATCH[1]}"
+        end_port="${BASH_REMATCH[2]}"
+        if ! is_valid_port "$start_port" || ! is_valid_port "$end_port" || (( end_port < start_port )); then
+            return 1
+        fi
+        firstport="$start_port"
+        endport="$end_port"
+        port="$firstport"
+        return 0
+    elif [[ $input_value =~ ^([0-9]+)$ ]]; then
+        single_port="${BASH_REMATCH[1]}"
+        if ! is_valid_port "$single_port"; then
+            return 1
+        fi
+        port="$single_port"
+        firstport=""
+        endport=""
+        return 0
+    fi
+
+    return 1
+}
+
 realip(){
     ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
 }
@@ -134,33 +163,34 @@ inst_cert(){
 }
 
 inst_port_config(){
-    local default_firstport default_endport default_hop_interval
-    default_firstport="${firstport:-30000}"
-    default_endport="${endport:-40000}"
+    local default_port_config default_hop_interval port_input
+
+    if [[ -n $firstport && -n $endport ]]; then
+        default_port_config="$firstport-$endport"
+    elif [[ -n $port ]]; then
+        default_port_config="$port"
+    else
+        default_port_config="30000-40000"
+    fi
     default_hop_interval="${hop_interval:-25}"
 
-    read_input_with_default firstport "请输入端口跳跃起始端口，回车使用默认值" "$default_firstport"
-    if ! is_valid_port "$firstport"; then
-        yellow "起始端口输入无效，已使用默认值：$default_firstport"
-        firstport="$default_firstport"
+    read_input_with_default port_input "请输入端口配置，支持 30000-40000、30000~40000 或单端口 443，回车使用默认值" "$default_port_config"
+    if ! parse_port_config "$port_input"; then
+        yellow "端口配置输入无效，已使用默认值：$default_port_config"
+        parse_port_config "$default_port_config" || parse_port_config "30000-40000"
     fi
 
-    read_input_with_default endport "请输入端口跳跃结束端口，回车使用默认值" "$default_endport"
-    if ! is_valid_port "$endport" || (( endport < firstport )); then
-        yellow "结束端口输入无效，已使用默认端口范围：$default_firstport - $default_endport"
-        firstport="$default_firstport"
-        endport="$default_endport"
-    fi
-
-    port=$firstport
-
-    read_input_with_default hop_interval "请输入端口跳跃间隔秒数，回车使用默认值" "$default_hop_interval"
-    if ! is_positive_integer "$hop_interval"; then
-        yellow "端口跳跃间隔输入无效，已使用默认值：$default_hop_interval"
+    if [[ -n $firstport && -n $endport ]]; then
+        read_input_with_default hop_interval "请输入端口跳跃间隔秒数，回车使用默认值" "$default_hop_interval"
+        if ! is_positive_integer "$hop_interval"; then
+            yellow "端口跳跃间隔输入无效，已使用默认值：$default_hop_interval"
+            hop_interval="$default_hop_interval"
+        fi
+        yellow "已启用 Hysteria 2 原生端口跳跃：$firstport - $endport (跳跃间隔: ${hop_interval}s)"
+    else
         hop_interval="$default_hop_interval"
+        yellow "已使用单端口模式：$port"
     fi
-
-    yellow "已启用 Hysteria 2 原生端口跳跃：$firstport - $endport (跳跃间隔: ${hop_interval}s)"
 }
 
 inst_pwd(){
@@ -430,7 +460,7 @@ EOF
 read_current_config(){
     if [[ -f /etc/hysteria/config.yaml ]]; then
         listen_value=$(grep "^listen:" /etc/hysteria/config.yaml | awk '{print $2}' | sed 's/[[:space:]]//g')
-        if [[ $listen_value =~ ^:?([0-9]+)-([0-9]+)$ ]]; then
+        if [[ $listen_value =~ ^:?([0-9]+)[-~]([0-9]+)$ ]]; then
             firstport="${BASH_REMATCH[1]}"
             endport="${BASH_REMATCH[2]}"
             port=$firstport
