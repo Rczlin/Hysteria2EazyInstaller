@@ -74,6 +74,24 @@ urlencode() {
     echo "$encoded"
 }
 
+read_input_with_default(){
+    local target_var="$1"
+    local prompt="$2"
+    local default_value="$3"
+    local input_value
+
+    read -rp "$prompt [$default_value]: " input_value
+    printf -v "$target_var" '%s' "${input_value:-$default_value}"
+}
+
+is_positive_integer(){
+    [[ $1 =~ ^[0-9]+$ ]] && (( $1 > 0 ))
+}
+
+is_valid_port(){
+    is_positive_integer "$1" && (( $1 <= 65535 ))
+}
+
 realip(){
     ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
 }
@@ -92,45 +110,106 @@ fix_permissions(){
 }
 
 inst_cert(){
+    local default_domain
+    default_domain="${hy_domain:-www.apple.com}"
+
     mkdir -p /etc/hysteria
 
-    green "将自动使用自签证书（www.apple.com）"
+    read_input_with_default hy_domain "请输入自签证书/SNI 域名，回车使用默认值" "$default_domain"
+    if [[ $hy_domain == *"/"* || $hy_domain =~ [[:space:]] ]]; then
+        yellow "证书域名输入无效，已使用默认值：$default_domain"
+        hy_domain="$default_domain"
+    fi
+
+    green "将使用自签证书（$hy_domain）"
 
     cert_path="/etc/hysteria/cert.crt"
     key_path="/etc/hysteria/private.key"
 
     openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
-    openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.apple.com"
+    openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=$hy_domain"
 
-    hy_domain="www.apple.com"
-    domain="www.apple.com"
+    domain="$hy_domain"
     insecure=1
 }
 
 inst_port_config(){
-    firstport=30000
-    endport=40000
+    local default_firstport default_endport default_hop_interval
+    default_firstport="${firstport:-30000}"
+    default_endport="${endport:-40000}"
+    default_hop_interval="${hop_interval:-25}"
+
+    read_input_with_default firstport "请输入端口跳跃起始端口，回车使用默认值" "$default_firstport"
+    if ! is_valid_port "$firstport"; then
+        yellow "起始端口输入无效，已使用默认值：$default_firstport"
+        firstport="$default_firstport"
+    fi
+
+    read_input_with_default endport "请输入端口跳跃结束端口，回车使用默认值" "$default_endport"
+    if ! is_valid_port "$endport" || (( endport < firstport )); then
+        yellow "结束端口输入无效，已使用默认端口范围：$default_firstport - $default_endport"
+        firstport="$default_firstport"
+        endport="$default_endport"
+    fi
+
     port=$firstport
-    hop_interval=25
+
+    read_input_with_default hop_interval "请输入端口跳跃间隔秒数，回车使用默认值" "$default_hop_interval"
+    if ! is_positive_integer "$hop_interval"; then
+        yellow "端口跳跃间隔输入无效，已使用默认值：$default_hop_interval"
+        hop_interval="$default_hop_interval"
+    fi
 
     yellow "已启用 Hysteria 2 原生端口跳跃：$firstport - $endport (跳跃间隔: ${hop_interval}s)"
 }
 
 inst_pwd(){
-    auth_pwd=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
-    yellow "已生成 32 位随机密码：$auth_pwd"
+    local default_pwd
+    default_pwd=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
+
+    read_input_with_default auth_pwd "设置 Hysteria 2 密码，回车使用随机生成值" "$default_pwd"
+    yellow "已设置 Hysteria 2 密码：$auth_pwd"
 }
 
 inst_site(){
+    local input_site
+
     masq_type="string"
     proxysite=""
-    green "已启用默认伪装：Nginx 私有服务器 403 页面"
+
+    read -rp "请输入反代伪装站点（回车使用默认 403 页面）: " input_site
+    if [[ -n $input_site ]]; then
+        input_site="${input_site#http://}"
+        input_site="${input_site#https://}"
+        input_site="${input_site%/}"
+    fi
+
+    if [[ -n $input_site ]]; then
+        masq_type="proxy"
+        proxysite="$input_site"
+        green "已启用反代伪装：https://$proxysite"
+    else
+        green "已启用默认伪装：Nginx 私有服务器 403 页面"
+    fi
 }
 
 inst_bandwidth(){
-    limit_bandwidth="no"
-    bandwidth_value=""
-    yellow "已默认使用：不限制带宽模式"
+    local bandwidth_input
+
+    read -rp "请输入带宽限速数值（单位 Mbps，回车不限制）: " bandwidth_input
+    if [[ -z $bandwidth_input ]]; then
+        limit_bandwidth="no"
+        bandwidth_value=""
+        yellow "已默认使用：不限制带宽模式"
+    elif is_positive_integer "$bandwidth_input"; then
+        limit_bandwidth="yes"
+        bandwidth_value="$bandwidth_input"
+        yellow "已设置带宽限速：$bandwidth_value Mbps"
+    else
+        limit_bandwidth="no"
+        bandwidth_value=""
+        yellow "带宽限速输入无效，已默认使用：不限制带宽模式"
+    fi
 }
 
 generate_config(){
@@ -143,6 +222,8 @@ generate_config(){
 
     cat << EOF > /etc/hysteria/config.yaml
 listen: $listen_value
+# hy2_hop_interval: ${hop_interval:-25}
+# hy2_insecure: ${insecure:-1}
 
 tls:
   cert: $cert_path
@@ -380,12 +461,17 @@ read_current_config(){
         
         hy_domain=$(openssl x509 -in "$cert_path" -noout -subject 2>/dev/null | sed 's/.*CN = //;s/,.*//' | sed 's/.*CN=//;s/,.*//')
         [[ -z $hy_domain ]] && hy_domain="www.apple.com"
-        hop_interval=25
-        # 如果是 apple.com 则认为是自签证书
-        if [[ $hy_domain == "www.apple.com" ]]; then
-            insecure=1
-        else
-            insecure=0
+
+        hop_interval=$(grep "^# hy2_hop_interval:" /etc/hysteria/config.yaml | awk '{print $3}')
+        [[ -z $hop_interval ]] && hop_interval=25
+
+        insecure=$(grep "^# hy2_insecure:" /etc/hysteria/config.yaml | awk '{print $3}')
+        if [[ $insecure != "0" && $insecure != "1" ]]; then
+            if [[ $hy_domain == "www.apple.com" ]]; then
+                insecure=1
+            else
+                insecure=0
+            fi
         fi
 
         return 0
