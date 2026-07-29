@@ -26,6 +26,7 @@ PACKAGE_INSTALL=("apt -y install" "apt -y install" "yum -y install" "yum -y inst
 client_yaml_output=""
 client_json_output=""
 client_url_output=""
+client_official_url_output=""
 clash_line_output=""
 qr_text_output=""
 
@@ -435,14 +436,17 @@ EOF
 
     # URL编码密码
     encoded_pwd=$(urlencode "$auth_pwd")
+    encoded_sni=$(urlencode "$hy_domain")
     
-    # 生成订阅链接 - 按照标准格式
+    # 生成节点分享链接
+    # 兼容链接使用纯数字端口 + mport，避免部分客户端把端口范围当作非法 URI 端口。
+    # 官方链接保留 Hysteria 2 原生多端口地址格式。
     if [[ -n $firstport && -n $endport ]]; then
-        # 端口跳跃模式
-        client_url_output="hysteria2://${encoded_pwd}@${last_ip}:${server_port_string}?security=tls&insecure=${insecure}&sni=${hy_domain}#Hysteria2"
+        client_url_output="hy2://${encoded_pwd}@${last_ip}:${port}/?mport=${server_port_string}&insecure=${insecure}&sni=${encoded_sni}#Hysteria2"
+        client_official_url_output="hysteria2://${encoded_pwd}@${last_ip}:${server_port_string}/?insecure=${insecure}&sni=${encoded_sni}#Hysteria2"
     else
-        # 单端口模式
-        client_url_output="hysteria2://${encoded_pwd}@${last_ip}:${port}?security=tls&insecure=${insecure}&sni=${hy_domain}#Hysteria2"
+        client_url_output="hy2://${encoded_pwd}@${last_ip}:${port}/?insecure=${insecure}&sni=${encoded_sni}#Hysteria2"
+        client_official_url_output="$client_url_output"
     fi
 
     if [[ -n $firstport && -n $endport ]]; then
@@ -709,8 +713,12 @@ insthysteria(){
     red "$client_yaml_output"
     yellow "Hysteria 2 客户端 JSON 配置如下"
     red "$client_json_output"
-    yellow "Hysteria 2 节点分享链接如下"
+    yellow "Hysteria 2 兼容节点分享链接（推荐导入 NekoBox 等客户端）如下"
     red "$client_url_output"
+    if [[ $client_official_url_output != "$client_url_output" ]]; then
+        yellow "Hysteria 2 官方原生端口跳跃链接如下"
+        red "$client_official_url_output"
+    fi
     if [[ -n $clash_line_output ]]; then
         yellow "Clash Verge YAML 单行节点（粘贴到 proxies: 下）如下"
         red "$clash_line_output"
@@ -903,8 +911,12 @@ showconf(){
     red "$client_yaml_output"
     yellow "Hysteria 2 客户端 JSON 配置如下"
     red "$client_json_output"
-    yellow "Hysteria 2 节点分享链接如下"
+    yellow "Hysteria 2 兼容节点分享链接（推荐导入 NekoBox 等客户端）如下"
     red "$client_url_output"
+    if [[ $client_official_url_output != "$client_url_output" ]]; then
+        yellow "Hysteria 2 官方原生端口跳跃链接如下"
+        red "$client_official_url_output"
+    fi
     if [[ -n $clash_line_output ]]; then
         yellow "Clash Verge YAML 单行节点（粘贴到 proxies: 下）如下"
         red "$clash_line_output"
