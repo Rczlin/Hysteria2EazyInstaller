@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - fix/hysteria2-uri-compatibility
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
